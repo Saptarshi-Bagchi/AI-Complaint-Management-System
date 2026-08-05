@@ -105,6 +105,36 @@ function ComplaintForm() {
             </div>
           </div>
         </div>
+
+        <div className="ai-insights-card" role="group" aria-label="AI complaint insights">
+          <div className="ai-insights-title">AI complaint insights</div>
+          <div className="ai-insights-grid">
+            <div className="ai-insight-item ai-insight-wide">
+              <span>Complaint Summary</span>
+              <p>{selected.complaintSummary || 'Awaiting AI extraction...'}</p>
+            </div>
+            <div className="ai-insight-item">
+              <span>Completeness</span>
+              <p>{selected.completenessScore != null ? `${Math.round(selected.completenessScore)}% complete` : 'Awaiting AI extraction...'}</p>
+            </div>
+            <div className="ai-insight-item">
+              <span>Missing Information</span>
+              <p>{selected.completenessMissing || 'None identified'}</p>
+            </div>
+            <div className="ai-insight-item ai-insight-wide">
+              <span>Root Cause Recommendation</span>
+              <p>{selected.rootCauseRecommendation || 'Awaiting AI extraction...'}</p>
+            </div>
+            <div className="ai-insight-item ai-insight-wide">
+              <span>CAPA Recommendation</span>
+              <p>{selected.capaSuggestion || 'Awaiting AI extraction...'}</p>
+            </div>
+            <div className={`ai-insight-item ai-insight-wide ${selected.duplicateComplaint ? 'duplicate-warning' : ''}`}>
+              <span>Duplicate Complaint Detection</span>
+              <p>{selected.duplicateComplaint ? selected.duplicateReason : 'No similar complaint found.'}</p>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div className="form-actions compact-actions">

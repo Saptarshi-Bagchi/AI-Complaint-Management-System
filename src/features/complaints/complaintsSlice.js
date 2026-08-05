@@ -24,6 +24,13 @@ const emptySelected = {
   riskSummary: '',
   nextAction: '',
   capaSuggestion: '',
+  complaintSummary: '',
+  completenessScore: null,
+  completenessMissing: '',
+  rootCauseRecommendation: '',
+  duplicateComplaint: false,
+  duplicateOf: null,
+  duplicateReason: '',
 };
 
 const initialState = {
@@ -228,6 +235,13 @@ const complaintsSlice = createSlice({
           riskSummary: analysis.riskSummary ?? state.selected.riskSummary,
           nextAction: analysis.nextAction ?? state.selected.nextAction,
           capaSuggestion: analysis.capaSuggestion ?? state.selected.capaSuggestion,
+          complaintSummary: analysis.complaintSummary ?? state.selected.complaintSummary,
+          completenessScore: analysis.completenessScore ?? state.selected.completenessScore,
+          completenessMissing: analysis.completenessMissing ?? state.selected.completenessMissing,
+          rootCauseRecommendation: analysis.rootCauseRecommendation ?? state.selected.rootCauseRecommendation,
+          duplicateComplaint: analysis.duplicateComplaint ?? state.selected.duplicateComplaint,
+          duplicateOf: analysis.duplicateOf ?? state.selected.duplicateOf,
+          duplicateReason: analysis.duplicateReason ?? state.selected.duplicateReason,
         };
       })
       .addCase(analyzeComplaint.rejected, (state, action) => {

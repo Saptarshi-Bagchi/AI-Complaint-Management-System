@@ -1,3 +1,5 @@
+from difflib import SequenceMatcher
+import re
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -18,6 +20,38 @@ router = APIRouter(prefix="/complaints", tags=["complaints"])
 ai_service = ComplaintAIService()
 
 MAX_FILE_SIZE = 10 * 1024 * 1024
+
+
+def _duplicate_match(message: str, analysis: dict, db: Session, exclude_id: int | None = None) -> dict:
+    def words(value: str | None) -> set[str]:
+        return set(re.findall(r"[a-z0-9]+", (value or "").lower()))
+
+    incoming_words = words(message)
+    incoming_product = (analysis.get("productName") or "").strip().lower()
+    incoming_batch = (analysis.get("batchNumber") or "").strip().lower()
+    best = None
+    best_score = 0.0
+    for complaint in db.query(Complaint).all():
+        if exclude_id is not None and complaint.id == exclude_id:
+            continue
+        existing_words = words(complaint.complaint_text)
+        if not incoming_words or not existing_words:
+            continue
+        similarity = SequenceMatcher(None, " ".join(sorted(incoming_words)), " ".join(sorted(existing_words))).ratio()
+        same_batch = bool(incoming_batch and incoming_batch == (complaint.batch_no or "").strip().lower())
+        same_product = bool(incoming_product and incoming_product == (complaint.product_name or "").strip().lower())
+        score = max(similarity, 0.86 if same_batch and same_product else 0.0, 0.74 if same_batch else 0.0)
+        if score > best_score:
+            best_score = score
+            best = complaint
+
+    if best is None or best_score < 0.74:
+        return {"duplicateComplaint": False, "duplicateOf": None, "duplicateReason": "No similar complaint found."}
+    return {
+        "duplicateComplaint": True,
+        "duplicateOf": best.id,
+        "duplicateReason": f"Similar complaint found with record #{best.id} ({round(best_score * 100)}% match).",
+    }
 
 class AnalyzeRequest(BaseModel):
     complaint_id: int
@@ -109,7 +143,13 @@ async def analyze_complaint(complaint_id: int, request: Request, db: Session = D
         "riskSummary": analysis.get("riskSummary"),
         "nextAction": analysis.get("nextAction"),
         "capaSuggestion": analysis.get("capaSuggestion"),
-        "debug": {"model": "llama-3.3-70b-versatile"},
+        "complaintSummary": analysis.get("complaintSummary"),
+        "completenessScore": analysis.get("completenessScore"),
+        "completenessMissing": analysis.get("completenessMissing"),
+        "rootCauseRecommendation": analysis.get("rootCauseRecommendation"),
+        "duplicateComplaint": analysis.get("duplicateComplaint"),
+        "duplicateOf": analysis.get("duplicateOf"),
+        "duplicateReason": analysis.get("duplicateReason"),
     }
 
     return response
@@ -152,6 +192,7 @@ def _run_complaint_pipeline(message: str, source: str | None, existing: dict, fo
         db.refresh(complaint)
 
         analysis = analyze_complaint_text(message, source=source)
+        analysis.update(_duplicate_match(message, analysis, db, exclude_id=complaint.id))
 
         if analysis.get("productName"):
             complaint.product_name = analysis["productName"]
@@ -190,6 +231,13 @@ def _run_complaint_pipeline(message: str, source: str | None, existing: dict, fo
                 "riskSummary": analysis.get("riskSummary"),
                 "nextAction": analysis.get("nextAction"),
                 "capaSuggestion": analysis.get("capaSuggestion"),
+                "complaintSummary": analysis.get("complaintSummary"),
+                "completenessScore": analysis.get("completenessScore"),
+                "completenessMissing": analysis.get("completenessMissing"),
+                "rootCauseRecommendation": analysis.get("rootCauseRecommendation"),
+                "duplicateComplaint": analysis.get("duplicateComplaint"),
+                "duplicateOf": analysis.get("duplicateOf"),
+                "duplicateReason": analysis.get("duplicateReason"),
             },
         }
 

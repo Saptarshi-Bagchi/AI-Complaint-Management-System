@@ -706,6 +706,59 @@ textarea {
   user-select: none;
 }
 
+.ai-insights-card {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.ai-insights-title {
+  margin-bottom: 10px;
+  color: #4f46e5;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.ai-insights-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.ai-insight-item {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.ai-insight-wide {
+  grid-column: 1 / -1;
+}
+
+.ai-insight-item span {
+  display: block;
+  margin-bottom: 4px;
+  color: #64748b;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.ai-insight-item p {
+  margin: 0;
+  color: #0f172a;
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
+.duplicate-warning {
+  border-color: #f59e0b;
+  background: #fffbeb;
+}
+
 
 .progress-card p {
   margin: 8px 0 0;

@@ -35,6 +35,10 @@ class GraphState(TypedDict, total=False):
     riskSummary: str
     nextAction: str
     capaSuggestion: str
+    complaintSummary: str
+    completenessScore: float
+    completenessMissing: str
+    rootCauseRecommendation: str
 
 
 def _load_groq_api_key() -> str | None:
@@ -261,7 +265,9 @@ def _assess_risk(state: GraphState, config: Any = None) -> dict[str, Any]:
 
     prompt = f"""
 You are an expert QA risk analyst. Based on the extracted complaint fields and the original complaint text, assign the appropriate severity, priority, status, and initial risk score.
-Also provide a short risk assessment summary, a recommended next action of no more than 8 words, and a CAPA suggestion.
+Also provide a short complaint summary, completeness assessment, likely root-cause recommendation, and CAPA recommendation.
+Keep nextAction to no more than 8 words, complaintSummary to no more than 40 words, rootCauseRecommendation and capaSuggestion to no more than 30 words each.
+Set completenessScore from 0 to 100 and list missing information as a semicolon-separated string.
 Return JSON only with the exact keys:
 - severity
 - priority
@@ -270,6 +276,10 @@ Return JSON only with the exact keys:
 - riskSummary
 - nextAction
 - capaSuggestion
+- complaintSummary
+- completenessScore
+- completenessMissing
+- rootCauseRecommendation
 
 Complaint fields:
 {json.dumps(extracted_fields, indent=2)}
@@ -300,6 +310,12 @@ Complaint text:
             except (TypeError, ValueError):
                 normalized["riskScore"] = None
 
+        if "completenessScore" in normalized and normalized["completenessScore"] is not None:
+            try:
+                normalized["completenessScore"] = min(max(float(normalized["completenessScore"]), 0.0), 100.0)
+            except (TypeError, ValueError):
+                normalized["completenessScore"] = None
+
         normalized.setdefault("status", state.get("status", "Pending Triage"))
         normalized.setdefault("severity", state.get("severity"))
         normalized.setdefault("priority", state.get("priority"))
@@ -311,6 +327,11 @@ Complaint text:
             "riskScore": 0.0,
             "riskSummary": "Initial risk assessment could not be completed.",
             "nextAction": "Review the complaint manually.",
+            "complaintSummary": "Complaint requires manual review.",
+            "completenessScore": 0.0,
+            "completenessMissing": "Complaint details",
+            "rootCauseRecommendation": "Investigate product, process, and handling records.",
+            "capaSuggestion": "Document findings and define corrective action.",
             "status": state.get("status", "Pending Triage"),
         }
 
