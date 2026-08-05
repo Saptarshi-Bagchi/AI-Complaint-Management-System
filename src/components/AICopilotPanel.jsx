@@ -1,15 +1,30 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import { Check, FlaskConical, Paperclip, Zap } from 'lucide-react';
-import { analyzeComplaint } from '../features/complaints/complaintsSlice';
+import { FlaskConical, Paperclip, Send } from 'lucide-react';
+import { processComplaintMessage } from '../features/complaints/complaintsSlice';
 import { appendAssistantReply, appendMessage, resetProgress, setProgress } from '../features/aiCopilot/aiCopilotSlice';
 import ChatBubble from './ChatBubble';
-import './ComplaintForm.css';
+
+const FIELD_LABELS = {
+  source: 'Source',
+  customerName: 'Customer name',
+  productName: 'Product name',
+  productStrength: 'Product strength',
+  batchNumber: 'Batch number',
+  manufacturingDate: 'Manufacturing date',
+  expiryDate: 'Expiry date',
+  quantityAffected: 'Quantity affected',
+  complaintType: 'Complaint type',
+  complaintDate: 'Complaint date',
+  description: 'Description',
+  severity: 'Severity',
+  priority: 'Priority',
+  status: 'Status',
+};
 
 function AICopilotPanel() {
   const dispatch = useDispatch();
   const aiState = useSelector((state) => state.aiCopilot);
-  const selected = useSelector((state) => state.complaints.selected);
   const fileInputRef = useRef(null);
   const [isDragging, setIsDragging] = useState(false);
   const [chatInput, setChatInput] = useState('');
@@ -38,7 +53,7 @@ function AICopilotPanel() {
     if (!file) return;
     simulateProgress('Uploading complaint document and preparing AI analysis...');
     dispatch(appendMessage({ id: Date.now(), role: 'user', text: `Uploaded ${file.name}` }));
-    dispatch(analyzeComplaint({ payload: { source: 'Portal' }, text: `Uploaded file: ${file.name}` }))
+    dispatch(processComplaintMessage({ message: `Uploaded file: ${file.name}`, source: 'Portal', forceNew: true }))
       .unwrap()
       .then(() => {
         dispatch(setProgress({ progress: 100, statusText: 'Extraction complete. The form has been populated with the latest details.' }));
@@ -52,29 +67,33 @@ function AICopilotPanel() {
       });
   };
 
-  const handleSubmitText = () => {
+  const sendMessage = () => {
     if (!chatInput.trim()) return;
-    simulateProgress('Processing pasted complaint text...');
+    simulateProgress('Processing your message...');
     dispatch(appendMessage({ id: Date.now(), role: 'user', text: chatInput }));
-    dispatch(analyzeComplaint({ payload: { source: 'Email' }, text: chatInput }))
+    dispatch(processComplaintMessage({ message: chatInput, source: 'Email' }))
       .unwrap()
-      .then(() => {
+      .then((result) => {
         dispatch(setProgress({ progress: 100, statusText: 'Extraction complete. The form has been populated with the latest details.' }));
         setProgressMessage('Extraction complete. The form has been populated with the latest details.');
-        dispatch(appendAssistantReply('The pasted complaint text was analyzed and populated into the form.'));
+        if (result?.intent === 'update_complaint') {
+          const patch = result.patch || {};
+          const updatedFields = Object.keys(patch);
+          if (updatedFields.length > 0) {
+            const updates = updatedFields.map((key) => `${FIELD_LABELS[key] || key} updated to ${patch[key]}.`);
+            dispatch(appendAssistantReply(updates.join(' ')));
+          } else {
+            dispatch(appendAssistantReply('No specific fields were identified to update.'));
+          }
+        } else {
+          dispatch(appendAssistantReply('The complaint text was analyzed and populated into the form.'));
+        }
       })
       .catch(() => {
         dispatch(resetProgress());
         setProgressMessage('');
-        dispatch(appendAssistantReply('The pasted text could not be analyzed. Please try again.'));
+        dispatch(appendAssistantReply('The message could not be processed. Please try again.'));
       });
-    setChatInput('');
-  };
-
-  const handleSendChat = () => {
-    if (!chatInput.trim()) return;
-    dispatch(appendMessage({ id: Date.now(), role: 'user', text: chatInput }));
-    dispatch(appendAssistantReply(`I’m reviewing the complaint for ${selected.customerName || 'the customer'} and will help verify the intake details.`));
     setChatInput('');
   };
 
@@ -100,11 +119,10 @@ function AICopilotPanel() {
       </div>
       <div className="copilot-divider" />
 
-      {/* Upload / Paste section */}
       <div className="upload-zone" onDrop={(e) => { e.preventDefault(); handleFileSelection(e.dataTransfer.files[0]); }} onDragOver={(e) => e.preventDefault()}>
-        <div className="upload-instruction">Drag &amp; drop complaint document here<br />or <span className="browse-link" onClick={() => fileInputRef.current?.click()}>click to browse</span></div>
+        <div className="upload-instruction">Drag & drop complaint document here<br />or <span className="browse-link" onClick={() => fileInputRef.current?.click()}>click to browse</span></div>
         <div className="paste-box" style={{ marginTop: 12 }}>
-          <button className="textarea-toggle" type="button" onClick={() => { /* kept simple: focus paste input */ document.getElementById('copilot-paste')?.focus(); }}>Paste Complaint Text / Email</button>
+          <button className="textarea-toggle" type="button" onClick={() => document.getElementById('copilot-paste')?.focus()}>Paste Complaint Text / Email</button>
           <textarea id="copilot-paste" placeholder="Paste complaint text or email here..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} style={{ marginTop: 8 }} />
         </div>
         <div className="helper-box">Supported formats: PDF, DOCX, TXT, EML — Max file size: 10MB</div>
@@ -121,42 +139,38 @@ function AICopilotPanel() {
         <p>{aiState.statusText || progressMessage || 'Waiting for analysis...'}</p>
       </div>
 
-      
-
       <div
         className={`copilot-chat-area ${isDragging ? 'dragging' : ''}`}
-        onDragOver={(event) => {
-          event.preventDefault();
-          setIsDragging(true);
-        }}
+        onDragOver={(event) => { event.preventDefault(); setIsDragging(true); }}
         onDragLeave={() => setIsDragging(false)}
-        onDrop={(event) => {
-          event.preventDefault();
-          setIsDragging(false);
-          handleFileSelection(event.dataTransfer.files[0]);
-        }}
+        onDrop={(event) => { event.preventDefault(); setIsDragging(false); handleFileSelection(event.dataTransfer.files[0]); }}
       >
         <div className="message-list">
           {aiState.chatMessages.map((message) => (
             <ChatBubble key={message.id} message={message} isAssistant={message.role === 'assistant'} />
           ))}
-          {/* progress messages are now shown in the extraction progress card above */}
         </div>
       </div>
 
       <div className="copilot-input-wrap">
         <div className="copilot-input-row">
+          <button type="button" className="clip-btn" onClick={() => fileInputRef.current?.click()} aria-label="Upload file">
+            <Paperclip size={16} />
+          </button>
           <input
             type="text"
             value={chatInput}
             onChange={(event) => setChatInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                sendMessage();
+              }
+            }}
             placeholder="Type a message or paste a complaint..."
           />
-          <button type="button" className="clip-btn" onClick={() => fileInputRef.current?.click()} aria-label="Upload file">
-            <Paperclip size={16} />
-          </button>
-          <button type="button" className="send-btn" onClick={handleSubmitText} aria-label="Send message">
-            <Check size={16} />
+          <button type="button" className="send-btn" onClick={sendMessage} aria-label="Send message">
+            <Send size={16} />
           </button>
         </div>
         <input

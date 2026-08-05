@@ -167,8 +167,8 @@ Return JSON only with the exact keys:
 - productName
 - productStrength
 - batchNumber
-- manufacturingDate
-- expiryDate
+- manufacturingDate (format as YYYY-MM-DD; if only month/year is known, use the 1st of that month, e.g. "2026-03-01")
+- expiryDate (format as YYYY-MM-DD; if only month/year is known, use the 1st of that month, e.g. "2028-02-01")
 - quantityAffected
 - complaintType
 - complaintDate
@@ -329,3 +329,206 @@ def analyze_complaint_text(complaint_text: str, source: str | None = None) -> di
             "description": complaint_text[:1200],
             "status": "Pending Triage",
         }
+
+
+# ---------------------------------------------------------------------------
+# Intent detection + field-level update support
+# ---------------------------------------------------------------------------
+
+# Fields that may be updated via a natural-language instruction. The
+# AI-generated assessment fields are intentionally excluded so that an
+# update such as "change the batch number" can never silently overwrite
+# the risk assessment, severity, or CAPA suggestion.
+_UPDATABLE_FIELD_KEYS = {
+    "source",
+    "customerName",
+    "productName",
+    "productStrength",
+    "batchNumber",
+    "manufacturingDate",
+    "expiryDate",
+    "quantityAffected",
+    "complaintType",
+    "complaintDate",
+    "description",
+    "severity",
+    "priority",
+    "status",
+}
+
+# Imperative verbs/phrases that strongly indicate an update request.
+_UPDATE_SIGNALS = [
+    "change", "update", "correct", "modify", "replace",
+    "set the", "set it", "should be", "needs to be", "is actually",
+    "fix the", "edit", "revise", "adjust", "make it", "make the",
+    "change the", "update the", "correct the",
+]
+
+# Narrative phrases that strongly indicate a brand-new complaint.
+_NEW_COMPLAINT_SIGNALS = [
+    "new complaint", "received a complaint", "complaint regarding",
+    "complaint about", "reported that", "we received",
+    "customer reported", "customer called", "customer emailed",
+    "a customer reported", "log a complaint", "log a new complaint",
+]
+
+
+def detect_complaint_intent(message: str, has_existing_complaint: bool) -> str:
+    """Classify a user message as ``new_complaint`` or ``update_complaint``.
+
+    When no complaint has been extracted yet the message is always treated as
+    a new complaint. When a complaint already exists the LLM is asked to
+    classify the intent; a keyword heuristic is used as a fallback. Ambiguous
+    messages default to ``update_complaint`` per the product requirements.
+    """
+    if not has_existing_complaint:
+        return "new_complaint"
+
+    text = (message or "").strip()
+    if not text:
+        return "new_complaint"
+
+    lowered = text.lower()
+
+    # ---- LLM-based detection (primary) -------------------------------------
+    try:
+        prompt = f"""Classify the user's message into exactly one of two intents:
+
+1. new_complaint - The user is describing a brand new customer complaint (reporting a product defect, describing an incident, pasting a complaint email or report).
+2. update_complaint - The user is requesting a modification to an already-extracted complaint (examples: "change the batch number to B12345", "update the customer's name", "the manufacturing date should be June 2026", "correct the lot number", "set the quantity to 5 boxes").
+
+An existing complaint has already been extracted, so ambiguous messages should be classified as update_complaint unless the message clearly describes a new complaint.
+
+User message:
+\"{text}\"
+
+Respond with ONLY one label: new_complaint or update_complaint"""
+
+        model = _build_chat_model(
+            model_name="llama-3.1-8b-instant",
+            temperature=0.0,
+            max_tokens=20,
+            timeout=15.0,
+        )
+        result = model.invoke(
+            [
+                ("system", "You are an intent classifier. Output exactly one label and nothing else."),
+                ("human", prompt),
+            ]
+        )
+        content = (result.content or "").strip().lower()
+        print("=== INTENT DETECTION (LLM) ===")
+        print(f"message: {text!r}")
+        print(f"response: {content!r}")
+        if "update_complaint" in content:
+            return "update_complaint"
+        if "new_complaint" in content:
+            return "new_complaint"
+        # Lenient parsing of a single-word response.
+        if "update" in content and "new" not in content:
+            return "update_complaint"
+        if "new" in content and "update" not in content:
+            return "new_complaint"
+    except Exception:
+        import traceback
+        print("=== INTENT DETECTION (LLM) FAILED, FALLING BACK TO HEURISTIC ===")
+        traceback.print_exc()
+
+    # ---- Heuristic fallback -------------------------------------------------
+    update_score = sum(1 for signal in _UPDATE_SIGNALS if signal in lowered)
+    new_score = sum(1 for signal in _NEW_COMPLAINT_SIGNALS if signal in lowered)
+
+    print(f"=== INTENT DETECTION (HEURISTIC) update_score={update_score} new_score={new_score} ===")
+
+    if new_score > update_score:
+        return "new_complaint"
+    if update_score > 0 and new_score == 0:
+        return "update_complaint"
+    if update_score >= new_score and update_score > 0:
+        return "update_complaint"
+
+    # Ambiguous with an existing complaint -> prefer update (requirement #4).
+    return "update_complaint"
+
+
+def update_complaint_fields(message: str, existing_fields: dict[str, Any]) -> dict[str, Any]:
+    """Extract ONLY the fields the user explicitly requests to change.
+
+    Returns a partial patch (subset of ``_UPDATABLE_FIELD_KEYS``) that can be
+    merged into the existing complaint object. Fields the user did not mention
+    are never included, so the existing values are preserved by the caller.
+    """
+    text = (message or "").strip()
+    if not text:
+        return {}
+
+    fields_json = json.dumps(existing_fields, indent=2, default=str)
+
+    prompt = f"""You are updating an existing pharmaceutical customer complaint record.
+The user is requesting specific modifications. Extract ONLY the fields the user explicitly asks to change.
+
+CRITICAL RULES:
+- Do NOT re-extract or regenerate any field the user did not mention.
+- Do NOT include productDescription, complaintType, severity, priority, status, riskScore, riskSummary, nextAction, capaSuggestion, or any other field unless the user explicitly references it.
+- Return ONLY the fields to update, using the exact key names listed below.
+- If the user mentions a date, format it as YYYY-MM-DD (if only month/year is known, use the 1st of that month, e.g. "2026-06-01").
+- If the user does not request any field change, return an empty JSON object {{}}.
+
+Available field keys:
+- source
+- customerName
+- productName
+- productStrength
+- batchNumber
+- manufacturingDate
+- expiryDate
+- quantityAffected
+- complaintType
+- complaintDate
+- description
+- severity
+- priority
+- status
+
+Existing complaint:
+{fields_json}
+
+User's update instruction:
+{text}
+
+Return JSON only with the fields to update. Do not include any field the user did not explicitly mention."""
+
+    messages = [
+        (
+            "system",
+            "You are a pharmaceutical QA assistant that applies targeted field updates to an existing complaint record. You never regenerate fields that were not explicitly requested.",
+        ),
+        ("human", prompt),
+    ]
+
+    try:
+        model = _build_chat_model(
+            model_name="llama-3.1-8b-instant",
+            temperature=0.0,
+            max_tokens=500,
+            timeout=30.0,
+        )
+        result = model.invoke(messages)
+        print("=== UPDATE EXTRACTION (RAW) ===")
+        print(result.content)
+        extracted_raw = _extract_json(result.content)
+        normalized = _normalize_fields(extracted_raw if isinstance(extracted_raw, dict) else {})
+        print("=== UPDATE EXTRACTION (NORMALIZED) ===")
+        print(normalized)
+
+        # Keep only updatable keys so the AI can never silently patch
+        # risk-assessment fields or introduce unknown keys.
+        patch = {key: value for key, value in normalized.items() if key in _UPDATABLE_FIELD_KEYS}
+        print("=== UPDATE PATCH (FINAL) ===")
+        print(patch)
+        return patch
+    except Exception:
+        import traceback
+        print("=== UPDATE EXTRACTION ERROR ===")
+        traceback.print_exc()
+        return {}

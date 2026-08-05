@@ -477,6 +477,7 @@ textarea {
   align-items: center;
   justify-content: center;
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .clip-btn {
@@ -487,6 +488,30 @@ textarea {
 .send-btn {
   background: #6366f1;
   color: white;
+}
+
+/* Ensure the copilot send button stays perfectly circular and vertically
+   centered with the input, overriding the generic rectangular .send-btn
+   rule defined later for the legacy chat input row. */
+.copilot-input-row .send-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  transition: background 160ms ease, transform 160ms ease;
+}
+
+.copilot-input-row .send-btn:hover {
+  background: #4f46e5;
+  transform: scale(1.05);
+}
+
+.copilot-input-row .clip-btn {
+  transition: color 160ms ease, transform 160ms ease;
+}
+
+.copilot-input-row .clip-btn:hover {
+  color: #4f46e5;
+  transform: scale(1.05);
 }
 
 .copilot-footer {
@@ -539,7 +564,7 @@ textarea {
 }
 
 .ai-risk-title {
-  font-weight: 700;
+  font-weight: 400;
   color: #4f46e5;
   font-size: 0.95rem;
 }
@@ -559,7 +584,7 @@ textarea {
 .ai-field-label {
   font-size: 0.75rem;
   color: #64748b;
-  font-weight: 700;
+  font-weight: 400;
 }
 
 .ai-field-value {
@@ -568,7 +593,7 @@ textarea {
   background: #ffffff;
   border: 1px solid #eef2ff;
   color: #0f172a;
-  font-weight: 600;
+  font-weight: 400;
 }
 
 .ai-multiline {

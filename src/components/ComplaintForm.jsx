@@ -1,10 +1,7 @@
 import { useMemo } from 'react';
 import { useSelector } from 'react-redux';
-import './ComplaintForm.css';
 
 const fieldOptions = {
-  source: ['Email', 'Phone', 'Portal', 'Letter'],
-  complaintType: ['Quality Defect', 'Adverse Event', 'Packaging', 'Counterfeit Suspicion', 'Other'],
   severity: ['Critical', 'Major', 'Minor'],
   priority: ['High', 'Medium', 'Low'],
 };
@@ -64,7 +61,7 @@ function ComplaintForm() {
       <div className="section-block">
         <h3>1. ORIGIN &amp; CUSTOMER DETAILS</h3>
         <div className="grid two-columns">
-          {renderInput({ label: 'Complaint Source', field: 'source', options: fieldOptions.source })}
+          {renderInput({ label: 'Complaint Source', field: 'source' })}
           {renderInput({ label: 'Customer Name', field: 'customerName' })}
         </div>
       </div>
@@ -82,30 +79,13 @@ function ComplaintForm() {
       </div>
 
       <div className="section-block">
-        <h3>3. COMPLAINT DETAILS</h3>
+        <h3>3. COMPLAINT CATEGORY &amp; DESCRIPTION</h3>
         <div className="grid two-columns">
-          {renderInput({ label: 'Complaint Date', field: 'complaintDate', type: 'date' })}
-          {renderInput({ label: 'Quantity Affected', field: 'quantityAffected' })}
-        </div>
-      </div>
-
-      <div className="section-block">
-        <h3>4. FACILITY &amp; MATERIAL IMPACT</h3>
-        <div className="grid two-columns">
-          {renderInput({ label: 'Originating Site', field: 'originatingSite' })}
-          {renderInput({ label: 'Impacted NPM (Non-Product Material)', field: 'impactedNpm' })}
-        </div>
-      </div>
-
-      <div className="section-block">
-        <h3>5. COMPLAINT CATEGORY &amp; DESCRIPTION</h3>
-        <div className="grid two-columns">
-          {renderInput({ label: 'Complaint Category', field: 'complaintType', options: fieldOptions.complaintType })}
+          {renderInput({ label: 'Complaint Category', field: 'complaintType' })}
           {renderInput({ label: 'Complaint Date', field: 'complaintDate', type: 'date' })}
         </div>
         {renderInput({ label: 'Complaint Description', field: 'description', type: 'textarea' })}
 
-        {/* Move AI risk assessment here (read-only) */}
         <div className="ai-risk-card" role="group" aria-label="AI copilot risk assessment" style={{ marginTop: 12 }}>
           <div className="ai-risk-header">
             <div className="ai-risk-title">AI copilot risk assessment</div>
