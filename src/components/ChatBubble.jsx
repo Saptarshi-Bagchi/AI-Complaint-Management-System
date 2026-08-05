@@ -1,6 +1,20 @@
-import { Zap } from 'lucide-react';
+import { Loader2, Zap } from 'lucide-react';
 
 function ChatBubble({ message, isAssistant }) {
+  if (message.role === 'processing') {
+    return (
+      <div className="chat-row assistant-row">
+        <div className="chat-avatar assistant-avatar">
+          <Loader2 size={16} className="spin" />
+        </div>
+        <div className="chat-card-bubble processing-bubble">
+          <p>{message.text}</p>
+          <div className="processing-bar" />
+        </div>
+      </div>
+    );
+  }
+
   if (isAssistant) {
     return (
       <div className="chat-row assistant-row">

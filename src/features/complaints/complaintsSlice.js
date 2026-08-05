@@ -2,6 +2,9 @@ import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
 import client from '../../api/client';
 import { setProgress as setAiProgress } from '../aiCopilot/aiCopilotSlice';
 
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
+const ACCEPTED_TYPES = ['.pdf', '.txt'];
+
 const emptySelected = {
   source: '',
   customerName: '',
@@ -30,16 +33,6 @@ const initialState = {
   error: null,
 };
 
-/**
- * Unified AI copilot entry point.
- *
- * Sends the user's message together with the current in-memory complaint
- * object to the backend, which detects the intent (new complaint vs. update)
- * and returns either a full extraction or a field-level patch.
- *
- * `forceNew` should be true for file uploads / explicit "new complaint"
- * actions so the backend always runs the full extraction pipeline.
- */
 export const processComplaintMessage = createAsyncThunk(
   'complaints/processComplaintMessage',
   async ({ message, source, forceNew = false }, { dispatch, getState, rejectWithValue }) => {
@@ -66,10 +59,51 @@ export const processComplaintMessage = createAsyncThunk(
   }
 );
 
-/**
- * Legacy thunk retained for backward compatibility with file-upload flows
- * that still use the two-step ingest + analyze pipeline.
- */
+export const processComplaintFile = createAsyncThunk(
+  'complaints/processComplaintFile',
+  async ({ file, source = 'Portal', forceNew = false }, { dispatch, getState, rejectWithValue }) => {
+    const lowerName = (file?.name || '').toLowerCase();
+    const isValidType = ACCEPTED_TYPES.some((ext) => lowerName.endsWith(ext));
+    if (!isValidType) {
+      return rejectWithValue('Unsupported file type. Only PDF and TXT files are supported.');
+    }
+    if (file.size > MAX_FILE_SIZE) {
+      return rejectWithValue('File is too large. Maximum size is 10MB.');
+    }
+
+    try {
+      dispatch(setAiProgress({ progress: 10, statusText: 'Uploading document...' }));
+
+      const currentSelected = getState().complaints.selected;
+      const currentComplaintId = getState().complaints.complaintId;
+
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('source', source);
+      formData.append('existing_complaint', JSON.stringify({ ...currentSelected, complaintId: currentComplaintId }));
+      formData.append('force_new', String(forceNew));
+
+      dispatch(setAiProgress({ progress: 30, statusText: 'Extracting text from document...' }));
+
+      const response = await client.post('/complaints/process-file', formData, {
+        onUploadProgress: (event) => {
+          if (event.total) {
+            const percent = Math.min(60, Math.round((event.loaded / event.total) * 60));
+            dispatch(setAiProgress({ progress: percent, statusText: 'Uploading document...' }));
+          }
+        },
+      });
+
+      dispatch(setAiProgress({ progress: 90, statusText: 'Finalizing extraction and populating the form...' }));
+      dispatch(setAiProgress({ progress: 100, statusText: 'Extraction complete. The form has been populated with the latest details.' }));
+
+      return response.data;
+    } catch (error) {
+      return rejectWithValue(error.response?.data?.detail || error.response?.data || error.message || 'File processing failed');
+    }
+  }
+);
+
 export const analyzeComplaint = createAsyncThunk(
   'complaints/analyzeComplaint',
   async ({ payload, text }, { dispatch, rejectWithValue }) => {
@@ -128,15 +162,12 @@ const complaintsSlice = createSlice({
         const { intent, complaintId, analysis, patch } = action.payload;
 
         if (intent === 'new_complaint') {
-          // New complaint: replace the entire in-memory object.
           state.complaintId = complaintId ?? state.complaintId;
           state.selected = {
             ...emptySelected,
             ...analysis,
           };
         } else {
-          // Update: merge ONLY the patch onto the existing object so that
-          // every field the user did not mention is preserved exactly.
           state.complaintId = complaintId ?? state.complaintId;
           if (patch && Object.keys(patch).length > 0) {
             state.selected = { ...state.selected, ...patch };
@@ -146,6 +177,28 @@ const complaintsSlice = createSlice({
       .addCase(processComplaintMessage.rejected, (state, action) => {
         state.loading = false;
         state.error = action.payload || 'Unable to process message';
+      })
+      .addCase(processComplaintFile.pending, (state) => {
+        state.loading = true;
+        state.error = null;
+      })
+      .addCase(processComplaintFile.fulfilled, (state, action) => {
+        state.loading = false;
+        const { intent, complaintId, analysis, patch } = action.payload;
+
+        if (intent === 'new_complaint') {
+          state.complaintId = complaintId ?? state.complaintId;
+          state.selected = { ...emptySelected, ...analysis };
+        } else {
+          state.complaintId = complaintId ?? state.complaintId;
+          if (patch && Object.keys(patch).length > 0) {
+            state.selected = { ...state.selected, ...patch };
+          }
+        }
+      })
+      .addCase(processComplaintFile.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.payload || 'Unable to process file';
       })
       .addCase(analyzeComplaint.pending, (state) => {
         state.loading = true;

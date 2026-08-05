@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { FlaskConical, Paperclip, Send } from 'lucide-react';
-import { processComplaintMessage } from '../features/complaints/complaintsSlice';
-import { appendAssistantReply, appendMessage, resetProgress, setProgress } from '../features/aiCopilot/aiCopilotSlice';
+import { processComplaintFile, processComplaintMessage } from '../features/complaints/complaintsSlice';
+import { appendAssistantReply, appendMessage, removeMessage, resetProgress, setProcessing, setProgress } from '../features/aiCopilot/aiCopilotSlice';
 import ChatBubble from './ChatBubble';
 
 const FIELD_LABELS = {
@@ -22,86 +22,117 @@ const FIELD_LABELS = {
   status: 'Status',
 };
 
+const ACCEPTED_EXTENSIONS = ['.pdf', '.txt'];
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
+
 function AICopilotPanel() {
   const dispatch = useDispatch();
   const aiState = useSelector((state) => state.aiCopilot);
+  const isProcessing = useSelector((state) => state.aiCopilot.isProcessing);
   const fileInputRef = useRef(null);
+  const messageListRef = useRef(null);
+  const progressTimeoutsRef = useRef([]);
   const [isDragging, setIsDragging] = useState(false);
   const [chatInput, setChatInput] = useState('');
-  const [progressMessage, setProgressMessage] = useState('');
+  const progressPercent = Math.round(aiState.progress);
 
-  const progressPercent = useMemo(() => Math.round(aiState.progress), [aiState.progress]);
+  useEffect(() => {
+    if (messageListRef.current) {
+      messageListRef.current.scrollTop = messageListRef.current.scrollHeight;
+    }
+  }, [aiState.chatMessages]);
 
   const simulateProgress = (statusText) => {
-    setProgressMessage(`${statusText} ${Math.max(10, progressPercent)}%`);
     dispatch(setProgress({ progress: 10, statusText }));
-    setTimeout(() => {
+    progressTimeoutsRef.current = [
+      setTimeout(() => {
       dispatch(setProgress({ progress: 30, statusText: 'Preparing the intake payload...' }));
-      setProgressMessage('Preparing the intake payload... 30%');
-    }, 450);
-    setTimeout(() => {
+      }, 450),
+      setTimeout(() => {
       dispatch(setProgress({ progress: 60, statusText: 'Analyzing document content and extracting key details...' }));
-      setProgressMessage('Analyzing document content and extracting key details... 60%');
-    }, 900);
-    setTimeout(() => {
+      }, 900),
+      setTimeout(() => {
       dispatch(setProgress({ progress: 90, statusText: 'Finalizing extraction and populating the form...' }));
-      setProgressMessage('Finalizing extraction and populating the form... 90%');
-    }, 1400);
+      }, 1400),
+    ];
   };
 
-  const handleFileSelection = (file) => {
-    if (!file) return;
-    simulateProgress('Uploading complaint document and preparing AI analysis...');
-    dispatch(appendMessage({ id: Date.now(), role: 'user', text: `Uploaded ${file.name}` }));
-    dispatch(processComplaintMessage({ message: `Uploaded file: ${file.name}`, source: 'Portal', forceNew: true }))
-      .unwrap()
-      .then(() => {
-        dispatch(setProgress({ progress: 100, statusText: 'Extraction complete. The form has been populated with the latest details.' }));
-        setProgressMessage('Extraction complete. The form has been populated with the latest details.');
-        dispatch(appendAssistantReply('The complaint details have been extracted and applied to the form.'));
-      })
-      .catch(() => {
-        dispatch(resetProgress());
-        setProgressMessage('');
-        dispatch(appendAssistantReply('The upload could not be processed. Please try again or paste the complaint text instead.'));
-      });
+  const clearProgressSimulation = () => {
+    progressTimeoutsRef.current.forEach(clearTimeout);
+    progressTimeoutsRef.current = [];
+  };
+
+  const handleResult = (result) => {
+    clearProgressSimulation();
+    dispatch(setProgress({ progress: 100, statusText: 'Extraction complete. The form has been populated with the latest details.' }));
+    if (result?.intent === 'out_of_scope' || result?.intent === 'complaint_question') {
+      dispatch(appendAssistantReply(result.response));
+    } else if (result?.intent === 'update_complaint') {
+      const patch = result.patch || {};
+      const updatedFields = Object.keys(patch);
+      if (updatedFields.length > 0) {
+        const updates = updatedFields.map((key) => `${FIELD_LABELS[key] || key} updated to ${patch[key]}.`);
+        dispatch(appendAssistantReply(updates.join(' ')));
+      } else {
+        dispatch(appendAssistantReply('No specific fields were identified to update.'));
+      }
+    } else {
+      dispatch(appendAssistantReply('The complaint text was analyzed and populated into the form.'));
+    }
+  };
+
+  const handleError = (message) => {
+    clearProgressSimulation();
+    dispatch(resetProgress());
+    dispatch(appendAssistantReply(message));
   };
 
   const sendMessage = () => {
-    if (!chatInput.trim()) return;
+    if (!chatInput.trim() || isProcessing) return;
+    dispatch(setProcessing(true));
     simulateProgress('Processing your message...');
     dispatch(appendMessage({ id: Date.now(), role: 'user', text: chatInput }));
     dispatch(processComplaintMessage({ message: chatInput, source: 'Email' }))
       .unwrap()
-      .then((result) => {
-        dispatch(setProgress({ progress: 100, statusText: 'Extraction complete. The form has been populated with the latest details.' }));
-        setProgressMessage('Extraction complete. The form has been populated with the latest details.');
-        if (result?.intent === 'update_complaint') {
-          const patch = result.patch || {};
-          const updatedFields = Object.keys(patch);
-          if (updatedFields.length > 0) {
-            const updates = updatedFields.map((key) => `${FIELD_LABELS[key] || key} updated to ${patch[key]}.`);
-            dispatch(appendAssistantReply(updates.join(' ')));
-          } else {
-            dispatch(appendAssistantReply('No specific fields were identified to update.'));
-          }
-        } else {
-          dispatch(appendAssistantReply('The complaint text was analyzed and populated into the form.'));
-        }
-      })
-      .catch(() => {
-        dispatch(resetProgress());
-        setProgressMessage('');
-        dispatch(appendAssistantReply('The message could not be processed. Please try again.'));
-      });
+      .then((result) => handleResult(result))
+      .catch(() => handleError('The message could not be processed. Please try again.'))
+      .finally(() => dispatch(setProcessing(false)));
     setChatInput('');
   };
 
-  useEffect(() => {
-    if (!aiState.chatMessages.length) {
-      dispatch(appendAssistantReply('Ready to process new complaints. You can paste the raw email from the customer, or upload a PDF of the complaint report. I will extract the data and run the initial risk assessment.'));
+  const validateFile = (file) => {
+    if (!file) return 'No file was selected.';
+    const lowerName = (file.name || '').toLowerCase();
+    const isValidType = ACCEPTED_EXTENSIONS.some((ext) => lowerName.endsWith(ext));
+    if (!isValidType) return 'Unsupported file type. Only PDF and TXT files are supported.';
+    if (file.size === 0) return 'The selected file is empty.';
+    if (file.size > MAX_FILE_SIZE) return 'File is too large. Maximum size is 10MB.';
+    return null;
+  };
+
+  const handleFileSelection = (file) => {
+    if (isProcessing) return;
+    const error = validateFile(file);
+    if (error) {
+      dispatch(appendAssistantReply(error));
+      return;
     }
-  }, [aiState.chatMessages.length, dispatch]);
+
+    dispatch(setProcessing(true));
+    simulateProgress('Uploading complaint document and preparing AI analysis...');
+    dispatch(appendMessage({ id: Date.now(), role: 'user', text: `Uploaded ${file.name}` }));
+    const processingMessageId = Date.now() + 1;
+    dispatch(appendMessage({ id: processingMessageId, role: 'processing', text: 'Processing document...' }));
+
+    dispatch(processComplaintFile({ file, source: 'Portal' }))
+      .unwrap()
+      .then((result) => handleResult(result))
+      .catch((err) => handleError(err || 'The upload could not be processed. Please try again or paste the complaint text instead.'))
+      .finally(() => {
+        dispatch(removeMessage(processingMessageId));
+        dispatch(setProcessing(false));
+      });
+  };
 
   return (
     <section className="panel panel-ai">
@@ -125,7 +156,7 @@ function AICopilotPanel() {
           <button className="textarea-toggle" type="button" onClick={() => document.getElementById('copilot-paste')?.focus()}>Paste Complaint Text / Email</button>
           <textarea id="copilot-paste" placeholder="Paste complaint text or email here..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} style={{ marginTop: 8 }} />
         </div>
-        <div className="helper-box">Supported formats: PDF, DOCX, TXT, EML — Max file size: 10MB</div>
+        <div className="helper-box">Supported formats: PDF, TXT — Max file size: 10MB</div>
       </div>
 
       <div className="copilot-progress-card">
@@ -136,7 +167,7 @@ function AICopilotPanel() {
         <div className="copilot-progress-bar">
           <div className="copilot-progress-fill" style={{ width: `${progressPercent}%` }} />
         </div>
-        <p>{aiState.statusText || progressMessage || 'Waiting for analysis...'}</p>
+        <p>{aiState.statusText}</p>
       </div>
 
       <div
@@ -145,7 +176,7 @@ function AICopilotPanel() {
         onDragLeave={() => setIsDragging(false)}
         onDrop={(event) => { event.preventDefault(); setIsDragging(false); handleFileSelection(event.dataTransfer.files[0]); }}
       >
-        <div className="message-list">
+        <div className="message-list" ref={messageListRef}>
           {aiState.chatMessages.map((message) => (
             <ChatBubble key={message.id} message={message} isAssistant={message.role === 'assistant'} />
           ))}
@@ -154,7 +185,7 @@ function AICopilotPanel() {
 
       <div className="copilot-input-wrap">
         <div className="copilot-input-row">
-          <button type="button" className="clip-btn" onClick={() => fileInputRef.current?.click()} aria-label="Upload file">
+          <button type="button" className="clip-btn" onClick={() => fileInputRef.current?.click()} aria-label="Upload file" disabled={isProcessing}>
             <Paperclip size={16} />
           </button>
           <input
@@ -169,7 +200,7 @@ function AICopilotPanel() {
             }}
             placeholder="Type a message or paste a complaint..."
           />
-          <button type="button" className="send-btn" onClick={sendMessage} aria-label="Send message">
+          <button type="button" className="send-btn" onClick={sendMessage} aria-label="Send message" disabled={isProcessing}>
             <Send size={16} />
           </button>
         </div>
@@ -177,7 +208,7 @@ function AICopilotPanel() {
           ref={fileInputRef}
           type="file"
           hidden
-          accept=".pdf,.docx,.txt,.eml"
+          accept=".pdf,.txt"
           onChange={(event) => handleFileSelection(event.target.files?.[0])}
         />
         <div className="copilot-footer">POWERED BY LANGGRAPH</div>
