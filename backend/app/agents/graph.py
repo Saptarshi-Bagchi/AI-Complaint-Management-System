@@ -146,15 +146,17 @@ def _parse_uploaded_bytes(raw_bytes: bytes, filename: str, content_type: str) ->
 
     return raw_bytes.decode("utf-8", errors="replace").strip()
 
-
 async def parse_uploaded_file(upload_file: UploadFile) -> str:
     raw_bytes = await upload_file.read()
     return _parse_uploaded_bytes(raw_bytes, upload_file.filename or "upload", upload_file.content_type or "")
 
-
-def _extract_complaint_fields(state: GraphState, config: Any) -> dict[str, Any]:
+def _extract_complaint_fields(state: GraphState, config: Any = None) -> dict[str, Any]:
+    print("=== STATE RECEIVED BY EXTRACT NODE ===")
+    print(state)
     text = _short_text(state.get("input_text", "") or "")
+    print(f"=== TEXT LENGTH: {len(text)} ===")
     if not text:
+        print("=== TEXT IS EMPTY, RETURNING EARLY ===")
         return {"status": "Pending Triage"}
 
     prompt = f"""
@@ -192,16 +194,26 @@ Complaint text:
             timeout=30.0,
         )
         result = model.invoke(messages)
+        print("=== RAW GROQ RESPONSE (extract) ===")
+        print(result.content)
         extracted_raw = _extract_json(result.content)
-        return _normalize_fields(extracted_raw if isinstance(extracted_raw, dict) else {})
-    except Exception:
+        print("=== PARSED JSON (extract) ===")
+        print(extracted_raw)
+        normalized = _normalize_fields(extracted_raw if isinstance(extracted_raw, dict) else {})
+        print("=== NORMALIZED (extract) ===")
+        print(normalized)
+        return normalized
+    except Exception as e:
+        import traceback
+        print("=== EXTRACTION ERROR ===")
+        traceback.print_exc()
         return {
             "description": text[:1200],
             "status": "Pending Triage",
         }
 
 
-def _assess_risk(state: GraphState, config: Any) -> dict[str, Any]:
+def _assess_risk(state: GraphState, config: Any = None) -> dict[str, Any]:
     text = _short_text(state.get("input_text", "") or "")
     if not text:
         return {
@@ -257,7 +269,6 @@ Complaint text:
             model_name="llama-3.3-70b-versatile",
             temperature=0.25,
             max_tokens=900,
-            reasoning_effort="high",
             timeout=60.0,
         )
         result = model.invoke(messages)
@@ -274,7 +285,10 @@ Complaint text:
         normalized.setdefault("severity", state.get("severity"))
         normalized.setdefault("priority", state.get("priority"))
         return normalized
-    except Exception:
+    except Exception as e:
+        import traceback
+        print("=== RISK ASSESSMENT ERROR ===")
+        traceback.print_exc()
         return {
             "riskScore": 0.0,
             "riskSummary": "Initial risk assessment could not be completed.",
@@ -296,14 +310,21 @@ _compiled_graph = _graph_builder.compile()
 
 
 def analyze_complaint_text(complaint_text: str, source: str | None = None) -> dict[str, Any]:
+    print("=== analyze_complaint_text CALLED ===")
+    print(f"complaint_text: {complaint_text!r}")
     state: GraphState = {"input_text": complaint_text}
     if source:
         state["source"] = source
 
     try:
         result = _compiled_graph.invoke(state)
+        print("=== GRAPH INVOKE SUCCEEDED ===")
+        print(result)
         return {k: v for k, v in result.items() if v is not None}
-    except Exception:
+    except Exception as e:
+        import traceback
+        print("=== GRAPH INVOKE FAILED ===")
+        traceback.print_exc()
         return {
             "description": complaint_text[:1200],
             "status": "Pending Triage",
