@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.db.database import get_db
 from app.models.complaint import Complaint
 from app.schemas.complaint import ComplaintCreate, ComplaintOut
 from app.services.complaint_ai import ComplaintAIService
+from app.agents.graph import analyze_complaint_text, parse_uploaded_file
 
 router = APIRouter(prefix="/complaints", tags=["complaints"])
 ai_service = ComplaintAIService()
@@ -33,54 +34,67 @@ def get_complaint(complaint_id: int, db: Session = Depends(get_db)):
     return db.query(Complaint).filter(Complaint.id == complaint_id).first()
 
 @router.post("/{complaint_id}/analyze")
-def analyze_complaint(complaint_id: int, payload: AnalyzeRequest, db: Session = Depends(get_db)):
+async def analyze_complaint(complaint_id: int, request: Request, db: Session = Depends(get_db)):
     complaint = db.query(Complaint).filter(Complaint.id == complaint_id).first()
     if not complaint:
-        return {"status": "error", "message": "Complaint not found"}
+        raise HTTPException(status_code=404, detail="Complaint not found")
 
-    complaint_text = payload.complaint_text or complaint.complaint_text or ""
-    extracted = ai_service.extract_fields(complaint_text)
+    complaint_text = complaint.complaint_text or ""
+    source = complaint.source
+    file_upload: UploadFile | None = None
 
-    # Apply extracted fields to the stored complaint (map camelCase -> snake_case)
-    # Only persist values that were actually extracted (non-empty / non-null)
-    if extracted.get("productName"):
-        complaint.product_name = extracted.get("productName")
-    if extracted.get("batchNumber"):
-        complaint.batch_no = extracted.get("batchNumber")
-    if extracted.get("customerName"):
-        complaint.customer_name = extracted.get("customerName")
-    if extracted.get("complaintType"):
-        complaint.category = extracted.get("complaintType")
-    if extracted.get("severity"):
-        complaint.severity = extracted.get("severity")
-    # status may be provided by the extractor, otherwise keep existing
-    if extracted.get("status"):
-        complaint.status = extracted.get("status")
+    if request.headers.get("content-type", "").startswith("multipart/"):
+        form = await request.form()
+        file_upload = form.get("file") if form.get("file") else None
+        complaint_text = str(form.get("complaint_text") or complaint_text)
+        source = str(form.get("source") or source)
+    else:
+        payload = await request.json()
+        complaint_text = str(payload.get("complaint_text") or complaint_text)
+        source = str(payload.get("source") or source)
+
+    if file_upload is not None:
+        extracted_text = await parse_uploaded_file(file_upload)
+    else:
+        extracted_text = complaint_text
+
+    analysis = analyze_complaint_text(extracted_text, source=source)
+
+    if analysis.get("productName"):
+        complaint.product_name = analysis["productName"]
+    if analysis.get("batchNumber"):
+        complaint.batch_no = analysis["batchNumber"]
+    if analysis.get("customerName"):
+        complaint.customer_name = analysis["customerName"]
+    if analysis.get("complaintType"):
+        complaint.category = analysis["complaintType"]
+    if analysis.get("severity"):
+        complaint.severity = analysis["severity"]
+    if analysis.get("status"):
+        complaint.status = analysis["status"]
+    if analysis.get("riskScore") is not None:
+        complaint.risk_score = float(analysis["riskScore"])
     db.commit()
 
-    # Debug logging for development: print extracted payload so server logs show AI output
-    try:
-        print(f"[analyze] complaint_id={complaint_id} extracted_keys={list(extracted.keys())}")
-        print(f"[analyze] extracted_sample={str({k: extracted.get(k) for k in ['customerName','productName','severity','description']})}")
-    except Exception:
-        pass
-
-    # Return the normalized analysis response (camelCase keys expected by frontend)
     response = {
-        "status": extracted.get("status", "Pending Triage"),
-        "description": extracted.get("description"),
-        "customerName": extracted.get("customerName"),
-        "productName": extracted.get("productName"),
-        "productStrength": extracted.get("productStrength"),
-        "batchNumber": extracted.get("batchNumber"),
-        "manufacturingDate": extracted.get("manufacturingDate"),
-        "expiryDate": extracted.get("expiryDate"),
-        "quantityAffected": extracted.get("quantityAffected"),
-        "complaintType": extracted.get("complaintType"),
-        "complaintDate": extracted.get("complaintDate"),
-        "severity": extracted.get("severity"),
-        "priority": extracted.get("priority"),
-        "debug": {"extracted_keys": list(extracted.keys())},
+        "status": analysis.get("status", complaint.status or "Pending Triage"),
+        "description": analysis.get("description"),
+        "customerName": analysis.get("customerName"),
+        "productName": analysis.get("productName"),
+        "productStrength": analysis.get("productStrength"),
+        "batchNumber": analysis.get("batchNumber"),
+        "manufacturingDate": analysis.get("manufacturingDate"),
+        "expiryDate": analysis.get("expiryDate"),
+        "quantityAffected": analysis.get("quantityAffected"),
+        "complaintType": analysis.get("complaintType"),
+        "complaintDate": analysis.get("complaintDate"),
+        "severity": analysis.get("severity"),
+        "priority": analysis.get("priority"),
+        "riskScore": analysis.get("riskScore"),
+        "riskSummary": analysis.get("riskSummary"),
+        "nextAction": analysis.get("nextAction"),
+        "capaSuggestion": analysis.get("capaSuggestion"),
+        "debug": {"model": "llama-3.1-8b-instant / llama-3.3-70b-versatile"},
     }
 
     return response

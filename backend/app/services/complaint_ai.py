@@ -55,20 +55,13 @@ Complaint text:
             return self._fallback_fields(complaint_text)
 
     def _fallback_fields(self, complaint_text: str) -> Dict[str, Any]:
-        # To avoid populating the system with fabricated defaults, the fallback
-        # returns only minimal, non-assertive fields. Real extraction should
-        # populate the rest. This keeps demo behaviour safe and prevents
-        # misleading data from being written to records.
         lowered = (complaint_text or "").lower()
         source = "Email" if "email" in lowered else "Portal" if "portal" in lowered else "Phone"
 
         return {
             "source": source,
-            # Preserve a short snippet of the complaint for reference, but
-            # avoid inventing names, batch numbers, dates, or severity levels.
             "description": (complaint_text[:240] if complaint_text else None),
             "status": "Pending Triage",
-            # Other keys intentionally left as None when not confidently extracted.
             "customerName": None,
             "productName": None,
             "productStrength": None,
