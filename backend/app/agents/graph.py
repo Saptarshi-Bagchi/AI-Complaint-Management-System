@@ -12,6 +12,8 @@ from langchain_groq import ChatGroq
 from langgraph.graph import START
 from langgraph.graph.state import StateGraph
 
+MODEL_NAME = "llama-3.3-70b-versatile"
+
 
 class GraphState(TypedDict, total=False):
     input_text: str
@@ -146,17 +148,43 @@ def _parse_uploaded_bytes(raw_bytes: bytes, filename: str, content_type: str) ->
 
     return raw_bytes.decode("utf-8", errors="replace").strip()
 
+
 async def parse_uploaded_file(upload_file: UploadFile) -> str:
     raw_bytes = await upload_file.read()
     return _parse_uploaded_bytes(raw_bytes, upload_file.filename or "upload", upload_file.content_type or "")
 
+
+async def extract_text_from_file(upload_file: UploadFile) -> str:
+    raw_bytes = await upload_file.read()
+    if not raw_bytes:
+        raise ValueError("File is empty")
+
+    lower_name = (upload_file.filename or "").lower()
+    content_type = upload_file.content_type or ""
+
+    if lower_name.endswith(".pdf") or content_type == "application/pdf":
+        try:
+            with pdfplumber.open(BytesIO(raw_bytes)) as pdf:
+                text = "\n\n".join(page.extract_text() or "" for page in pdf.pages).strip()
+                if not text:
+                    raise ValueError("No text could be extracted from the PDF. It may be empty or contain only images.")
+                return text
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(f"Failed to parse PDF: {str(e)}")
+
+    if lower_name.endswith(".txt") or content_type.startswith("text/"):
+        text = raw_bytes.decode("utf-8", errors="replace").strip()
+        if not text:
+            raise ValueError("The text file is empty.")
+        return text
+
+    raise ValueError("Unsupported file type. Only PDF and TXT files are supported.")
+
 def _extract_complaint_fields(state: GraphState, config: Any = None) -> dict[str, Any]:
-    print("=== STATE RECEIVED BY EXTRACT NODE ===")
-    print(state)
     text = _short_text(state.get("input_text", "") or "")
-    print(f"=== TEXT LENGTH: {len(text)} ===")
     if not text:
-        print("=== TEXT IS EMPTY, RETURNING EARLY ===")
         return {"status": "Pending Triage"}
 
     prompt = f"""
@@ -188,25 +216,16 @@ Complaint text:
 
     try:
         model = _build_chat_model(
-            model_name="llama-3.1-8b-instant",
+            model_name=MODEL_NAME,
             temperature=0.0,
             max_tokens=900,
             timeout=30.0,
         )
         result = model.invoke(messages)
-        print("=== RAW GROQ RESPONSE (extract) ===")
-        print(result.content)
         extracted_raw = _extract_json(result.content)
-        print("=== PARSED JSON (extract) ===")
-        print(extracted_raw)
         normalized = _normalize_fields(extracted_raw if isinstance(extracted_raw, dict) else {})
-        print("=== NORMALIZED (extract) ===")
-        print(normalized)
         return normalized
-    except Exception as e:
-        import traceback
-        print("=== EXTRACTION ERROR ===")
-        traceback.print_exc()
+    except Exception:
         return {
             "description": text[:1200],
             "status": "Pending Triage",
@@ -242,7 +261,7 @@ def _assess_risk(state: GraphState, config: Any = None) -> dict[str, Any]:
 
     prompt = f"""
 You are an expert QA risk analyst. Based on the extracted complaint fields and the original complaint text, assign the appropriate severity, priority, status, and initial risk score.
-Also provide a short risk assessment summary, a recommended next action, and a CAPA suggestion.
+Also provide a short risk assessment summary, a recommended next action of no more than 8 words, and a CAPA suggestion.
 Return JSON only with the exact keys:
 - severity
 - priority
@@ -266,7 +285,7 @@ Complaint text:
 
     try:
         model = _build_chat_model(
-            model_name="llama-3.3-70b-versatile",
+            model_name=MODEL_NAME,
             temperature=0.25,
             max_tokens=900,
             timeout=60.0,
@@ -284,11 +303,10 @@ Complaint text:
         normalized.setdefault("status", state.get("status", "Pending Triage"))
         normalized.setdefault("severity", state.get("severity"))
         normalized.setdefault("priority", state.get("priority"))
+        if normalized.get("nextAction"):
+            normalized["nextAction"] = " ".join(str(normalized["nextAction"]).split()[:8])
         return normalized
-    except Exception as e:
-        import traceback
-        print("=== RISK ASSESSMENT ERROR ===")
-        traceback.print_exc()
+    except Exception:
         return {
             "riskScore": 0.0,
             "riskSummary": "Initial risk assessment could not be completed.",
@@ -310,35 +328,20 @@ _compiled_graph = _graph_builder.compile()
 
 
 def analyze_complaint_text(complaint_text: str, source: str | None = None) -> dict[str, Any]:
-    print("=== analyze_complaint_text CALLED ===")
-    print(f"complaint_text: {complaint_text!r}")
     state: GraphState = {"input_text": complaint_text}
     if source:
         state["source"] = source
 
     try:
         result = _compiled_graph.invoke(state)
-        print("=== GRAPH INVOKE SUCCEEDED ===")
-        print(result)
         return {k: v for k, v in result.items() if v is not None}
-    except Exception as e:
-        import traceback
-        print("=== GRAPH INVOKE FAILED ===")
-        traceback.print_exc()
+    except Exception:
         return {
             "description": complaint_text[:1200],
             "status": "Pending Triage",
         }
 
 
-# ---------------------------------------------------------------------------
-# Intent detection + field-level update support
-# ---------------------------------------------------------------------------
-
-# Fields that may be updated via a natural-language instruction. The
-# AI-generated assessment fields are intentionally excluded so that an
-# update such as "change the batch number" can never silently overwrite
-# the risk assessment, severity, or CAPA suggestion.
 _UPDATABLE_FIELD_KEYS = {
     "source",
     "customerName",
@@ -356,7 +359,6 @@ _UPDATABLE_FIELD_KEYS = {
     "status",
 }
 
-# Imperative verbs/phrases that strongly indicate an update request.
 _UPDATE_SIGNALS = [
     "change", "update", "correct", "modify", "replace",
     "set the", "set it", "should be", "needs to be", "is actually",
@@ -364,7 +366,6 @@ _UPDATE_SIGNALS = [
     "change the", "update the", "correct the",
 ]
 
-# Narrative phrases that strongly indicate a brand-new complaint.
 _NEW_COMPLAINT_SIGNALS = [
     "new complaint", "received a complaint", "complaint regarding",
     "complaint about", "reported that", "we received",
@@ -372,92 +373,113 @@ _NEW_COMPLAINT_SIGNALS = [
     "a customer reported", "log a complaint", "log a new complaint",
 ]
 
+_QUESTION_SIGNALS = [
+    "what", "when", "where", "why", "how", "can you", "could you",
+    "show me", "tell me", "explain", "summarize", "next step", "risk",
+]
+
+_COMPLAINT_SIGNALS = [
+    "complaint", "product", "medicine", "medication", "tablet", "capsule",
+    "batch", "lot", "defect", "damaged", "adverse", "reaction", "side effect",
+    "quality", "patient", "customer",
+]
+
 
 def detect_complaint_intent(message: str, has_existing_complaint: bool) -> str:
-    """Classify a user message as ``new_complaint`` or ``update_complaint``.
-
-    When no complaint has been extracted yet the message is always treated as
-    a new complaint. When a complaint already exists the LLM is asked to
-    classify the intent; a keyword heuristic is used as a fallback. Ambiguous
-    messages default to ``update_complaint`` per the product requirements.
-    """
-    if not has_existing_complaint:
-        return "new_complaint"
-
     text = (message or "").strip()
     if not text:
-        return "new_complaint"
+        return "out_of_scope"
 
     lowered = text.lower()
 
-    # ---- LLM-based detection (primary) -------------------------------------
     try:
-        prompt = f"""Classify the user's message into exactly one of two intents:
+        prompt = f"""Classify the user's message into exactly one of four intents:
 
 1. new_complaint - The user is describing a brand new customer complaint (reporting a product defect, describing an incident, pasting a complaint email or report).
 2. update_complaint - The user is requesting a modification to an already-extracted complaint (examples: "change the batch number to B12345", "update the customer's name", "the manufacturing date should be June 2026", "correct the lot number", "set the quantity to 5 boxes").
+3. complaint_question - The user is asking for information, a summary, an explanation, or the next action about the existing complaint without asking to change a field.
+4. out_of_scope - The message is unrelated to pharmaceutical complaint intake, updates, triage, investigation, risk, status, or follow-up actions.
 
-An existing complaint has already been extracted, so ambiguous messages should be classified as update_complaint unless the message clearly describes a new complaint.
+Keep the conversation strictly about pharmaceutical complaint intake, triage, investigation, risk, fields, status, and follow-up actions. Do not treat general chatbot requests as complaint questions.
+{('An existing complaint has already been extracted, so ambiguous field-related messages should be classified as update_complaint.' if has_existing_complaint else 'No complaint has been recorded yet. The first in-scope message must contain a customer complaint; otherwise classify it as out_of_scope.')}
 
 User message:
 \"{text}\"
 
-Respond with ONLY one label: new_complaint or update_complaint"""
+Respond with ONLY one label: new_complaint, update_complaint, complaint_question, or out_of_scope"""
 
         model = _build_chat_model(
-            model_name="llama-3.1-8b-instant",
+            model_name=MODEL_NAME,
             temperature=0.0,
             max_tokens=20,
             timeout=15.0,
         )
         result = model.invoke(
             [
-                ("system", "You are an intent classifier. Output exactly one label and nothing else."),
+                ("system", "You classify messages for a pharmaceutical complaint management system. Output exactly one label and nothing else."),
                 ("human", prompt),
             ]
         )
         content = (result.content or "").strip().lower()
-        print("=== INTENT DETECTION (LLM) ===")
-        print(f"message: {text!r}")
-        print(f"response: {content!r}")
+        if "out_of_scope" in content:
+            return "out_of_scope"
+        if "complaint_question" in content:
+            return "complaint_question"
         if "update_complaint" in content:
             return "update_complaint"
         if "new_complaint" in content:
             return "new_complaint"
-        # Lenient parsing of a single-word response.
         if "update" in content and "new" not in content:
             return "update_complaint"
         if "new" in content and "update" not in content:
             return "new_complaint"
     except Exception:
-        import traceback
-        print("=== INTENT DETECTION (LLM) FAILED, FALLING BACK TO HEURISTIC ===")
-        traceback.print_exc()
+        pass
 
-    # ---- Heuristic fallback -------------------------------------------------
     update_score = sum(1 for signal in _UPDATE_SIGNALS if signal in lowered)
     new_score = sum(1 for signal in _NEW_COMPLAINT_SIGNALS if signal in lowered)
-
-    print(f"=== INTENT DETECTION (HEURISTIC) update_score={update_score} new_score={new_score} ===")
+    question_score = sum(1 for signal in _QUESTION_SIGNALS if lowered.startswith(signal) or f" {signal} " in lowered)
+    complaint_score = sum(1 for signal in _COMPLAINT_SIGNALS if signal in lowered)
 
     if new_score > update_score:
+        return "new_complaint"
+    if question_score > 0 and update_score == 0:
+        return "complaint_question"
+    if not has_existing_complaint and complaint_score > 0:
         return "new_complaint"
     if update_score > 0 and new_score == 0:
         return "update_complaint"
     if update_score >= new_score and update_score > 0:
         return "update_complaint"
 
-    # Ambiguous with an existing complaint -> prefer update (requirement #4).
-    return "update_complaint"
+    return "update_complaint" if has_existing_complaint else "out_of_scope"
+
+
+def answer_complaint_question(message: str, existing_fields: dict[str, Any]) -> str:
+    fields_json = json.dumps(existing_fields, indent=2, default=str)
+    prompt = f"""Answer the user's question using only the existing pharmaceutical complaint record below.
+Stay strictly within complaint management: intake details, field values, triage, risk, investigation, status, and next actions.
+Do not act as a general chatbot, provide unrelated information, invent facts, or change any complaint field.
+If the question is outside complaint management, say that you can only help with this complaint record.
+
+Existing complaint:
+{fields_json}
+
+User question:
+{message}
+"""
+    try:
+        model = _build_chat_model(model_name=MODEL_NAME, temperature=0.0, max_tokens=300, timeout=30.0)
+        result = model.invoke([
+            ("system", "You are a pharmaceutical complaint management analyst. Answer only in scope."),
+            ("human", prompt),
+        ])
+        return (result.content or "I can help with the complaint details, triage, risk, status, or next action.").strip()
+    except Exception:
+        return "I can help with the complaint details, triage, risk, status, or next action."
 
 
 def update_complaint_fields(message: str, existing_fields: dict[str, Any]) -> dict[str, Any]:
-    """Extract ONLY the fields the user explicitly requests to change.
-
-    Returns a partial patch (subset of ``_UPDATABLE_FIELD_KEYS``) that can be
-    merged into the existing complaint object. Fields the user did not mention
-    are never included, so the existing values are preserved by the caller.
-    """
     text = (message or "").strip()
     if not text:
         return {}
@@ -508,27 +530,16 @@ Return JSON only with the fields to update. Do not include any field the user di
 
     try:
         model = _build_chat_model(
-            model_name="llama-3.1-8b-instant",
+            model_name=MODEL_NAME,
             temperature=0.0,
             max_tokens=500,
             timeout=30.0,
         )
         result = model.invoke(messages)
-        print("=== UPDATE EXTRACTION (RAW) ===")
-        print(result.content)
         extracted_raw = _extract_json(result.content)
         normalized = _normalize_fields(extracted_raw if isinstance(extracted_raw, dict) else {})
-        print("=== UPDATE EXTRACTION (NORMALIZED) ===")
-        print(normalized)
 
-        # Keep only updatable keys so the AI can never silently patch
-        # risk-assessment fields or introduce unknown keys.
         patch = {key: value for key, value in normalized.items() if key in _UPDATABLE_FIELD_KEYS}
-        print("=== UPDATE PATCH (FINAL) ===")
-        print(patch)
         return patch
     except Exception:
-        import traceback
-        print("=== UPDATE EXTRACTION ERROR ===")
-        traceback.print_exc()
         return {}

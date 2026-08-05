@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.db.database import get_db
@@ -8,12 +8,16 @@ from app.services.complaint_ai import ComplaintAIService
 from app.agents.graph import (
     analyze_complaint_text,
     detect_complaint_intent,
+    extract_text_from_file,
     parse_uploaded_file,
+    answer_complaint_question,
     update_complaint_fields,
 )
 
 router = APIRouter(prefix="/complaints", tags=["complaints"])
 ai_service = ComplaintAIService()
+
+MAX_FILE_SIZE = 10 * 1024 * 1024
 
 class AnalyzeRequest(BaseModel):
     complaint_id: int
@@ -25,12 +29,7 @@ class ChatRequest(BaseModel):
 class ProcessMessageRequest(BaseModel):
     message: str
     source: str | None = None
-    # The current in-memory complaint object (from the frontend). When this is
-    # non-empty the backend can decide whether the message is an update to it
-    # or a brand-new complaint.
     existing_complaint: dict | None = None
-    # When True the message is always treated as a new complaint (used for
-    # file uploads / explicit "new complaint" actions).
     force_new: bool = False
 
 @router.post("/ingest", response_model=ComplaintOut)
@@ -110,7 +109,7 @@ async def analyze_complaint(complaint_id: int, request: Request, db: Session = D
         "riskSummary": analysis.get("riskSummary"),
         "nextAction": analysis.get("nextAction"),
         "capaSuggestion": analysis.get("capaSuggestion"),
-        "debug": {"model": "llama-3.1-8b-instant / llama-3.3-70b-versatile"},
+        "debug": {"model": "llama-3.3-70b-versatile"},
     }
 
     return response
@@ -127,22 +126,8 @@ def chat_with_complaint(complaint_id: int, payload: ChatRequest):
     }
 
 
-@router.post("/process-message")
-def process_message(payload: ProcessMessageRequest, db: Session = Depends(get_db)):
-    """Unified entry point for the AI copilot.
-
-    Detects the user's intent first, then either:
-      * runs the full extraction pipeline for a NEW complaint, or
-      * applies a field-level PATCH for an UPDATE to an existing complaint.
-
-    The response always carries the ``intent`` so the frontend can decide how
-    to merge the result into its in-memory state.
-    """
-    message = (payload.message or "").strip()
-    existing = payload.existing_complaint or {}
-
-    # A complaint "exists" once at least one extracted field has been
-    # populated. An empty/blank form is treated as no existing complaint.
+def _run_complaint_pipeline(message: str, source: str | None, existing: dict, force_new: bool, db: Session) -> dict:
+    message = (message or "").strip()
     has_existing = bool(
         existing
         and any(
@@ -152,25 +137,21 @@ def process_message(payload: ProcessMessageRequest, db: Session = Depends(get_db
         )
     )
 
-    # File uploads / explicit "new complaint" actions bypass intent detection.
-    if payload.force_new:
+    if force_new:
         intent = "new_complaint"
     else:
         intent = detect_complaint_intent(message, has_existing_complaint=has_existing)
 
-    print(f"=== PROCESS-MESSAGE intent={intent} has_existing={has_existing} ===")
-
     if intent == "new_complaint":
-        # ---- New complaint: full extraction pipeline -----------------------
         complaint = Complaint(
-            source=payload.source or "manual",
+            source=source or "manual",
             complaint_text=message or "No text provided",
         )
         db.add(complaint)
         db.commit()
         db.refresh(complaint)
 
-        analysis = analyze_complaint_text(message, source=payload.source)
+        analysis = analyze_complaint_text(message, source=source)
 
         if analysis.get("productName"):
             complaint.product_name = analysis["productName"]
@@ -212,11 +193,21 @@ def process_message(payload: ProcessMessageRequest, db: Session = Depends(get_db
             },
         }
 
-    # ---- Update existing complaint: field-level patch ----------------------
-    patch = update_complaint_fields(message, existing)
+    if intent == "out_of_scope":
+        return {
+            "intent": "out_of_scope",
+            "complaintId": existing.get("complaintId"),
+            "response": "I can only help with this complaint’s details, updates, triage, risk, status, or next actions.",
+        }
 
-    # Merge the patch onto the existing object so the caller receives the
-    # full, up-to-date complaint (unchanged fields are preserved).
+    if intent == "complaint_question":
+        return {
+            "intent": "complaint_question",
+            "complaintId": existing.get("complaintId"),
+            "response": answer_complaint_question(message, existing),
+        }
+
+    patch = update_complaint_fields(message, existing)
     merged = {**existing, **patch}
 
     return {
@@ -225,3 +216,60 @@ def process_message(payload: ProcessMessageRequest, db: Session = Depends(get_db
         "patch": patch,
         "analysis": merged,
     }
+
+
+@router.post("/process-message")
+def process_message(payload: ProcessMessageRequest, db: Session = Depends(get_db)):
+    return _run_complaint_pipeline(
+        message=payload.message,
+        source=payload.source,
+        existing=payload.existing_complaint or {},
+        force_new=payload.force_new,
+        db=db,
+    )
+
+
+@router.post("/process-file")
+async def process_file(
+    file: UploadFile = File(...),
+    source: str = "Portal",
+    existing_complaint: str | None = None,
+    force_new: bool = False,
+    db: Session = Depends(get_db),
+):
+    import json
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file was uploaded.")
+
+    lower_name = file.filename.lower()
+    if not (lower_name.endswith(".pdf") or lower_name.endswith(".txt")):
+        raise HTTPException(status_code=400, detail="Unsupported file type. Only PDF and TXT files are supported.")
+
+    file.file.seek(0, 2)
+    size = file.file.tell()
+    file.file.seek(0)
+    if size > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="File is too large. Maximum size is 10MB.")
+
+    try:
+        extracted_text = await extract_text_from_file(file)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Text extraction failed: {str(e)}")
+
+    existing = {}
+    if existing_complaint:
+        try:
+            existing = json.loads(existing_complaint)
+        except json.JSONDecodeError:
+            existing = {}
+
+    return _run_complaint_pipeline(
+        message=extracted_text,
+        source=source,
+        existing=existing,
+        force_new=force_new,
+        db=db,
+    )
